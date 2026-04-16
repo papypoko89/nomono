@@ -27,6 +27,7 @@ export default function App() {
   useEffect(() => {
     // Check existing session
     supabase.auth.getSession().then(({ data: { session: s } }) => {
+      console.log("Initial session:", s ? "found" : "none");
       if (s) {
         setSession(s);
         loadMember(s.user.id);
@@ -36,29 +37,51 @@ export default function App() {
     });
 
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
+      console.log("Auth event:", event, s ? s.user.email : "no session");
       setSession(s);
-      if (s) loadMember(s.user.id);
+      if (s && event === 'SIGNED_IN') {
+        loadMember(s.user.id);
+      }
     });
 
     return () => subscription.unsubscribe();
   }, []);
 
   const loadMember = async (authId) => {
+    console.log("Loading member for auth_id:", authId);
     try {
       const { data, error: err } = await supabase
         .from("members")
         .select("*")
         .eq("auth_id", authId)
-        .single();
+        .maybeSingle();
+
+      console.log("Member query result:", { data, err });
+
+      if (err) {
+        console.error("Member query error:", err);
+        // RLS might block - try waiting and retry once
+        await new Promise(r => setTimeout(r, 1000));
+        const retry = await supabase.from("members").select("*").eq("auth_id", authId).maybeSingle();
+        console.log("Retry result:", retry);
+        if (retry.data) {
+          setMember(retry.data);
+          setScreen("home");
+          setLoading(false);
+          return;
+        }
+      }
 
       if (data) {
         setMember(data);
         setScreen("home");
       } else {
+        console.log("No member found, showing onboarding");
         setScreen("onboarding");
       }
     } catch (e) {
+      console.error("loadMember exception:", e);
       setScreen("onboarding");
     }
     setLoading(false);
@@ -68,27 +91,42 @@ export default function App() {
     setError("");
     setLoading(true);
     try {
+      // Step 1: Sign up
       const { data: authData, error: authErr } = await supabase.auth.signUp({ email, password });
+      console.log("SignUp result:", { authData, authErr });
       if (authErr) throw authErr;
 
       const userId = authData.user?.id;
-      if (!userId) throw new Error("Signup berhasil, silakan cek email untuk konfirmasi.");
+      const sess = authData.session;
+      if (!userId) throw new Error("Signup berhasil, silakan login manual.");
 
-      // Register member via RPC
-      const { data: memberData, error: rpcErr } = await supabase.rpc("register_member", {
-        p_auth_id: userId,
-        p_full_name: fullName,
-        p_email: email,
-        p_phone: phone || null,
-        p_date_of_birth: dob || null,
-      });
-
-      if (rpcErr) throw rpcErr;
-      await loadMember(userId);
+      // Step 2: If we have a session, register member
+      if (sess) {
+        console.log("Have session after signup, registering member...");
+        const { data: memberData, error: rpcErr } = await supabase.rpc("register_member", {
+          p_auth_id: userId,
+          p_full_name: fullName,
+          p_email: email,
+          p_phone: phone || null,
+          p_date_of_birth: dob || null,
+        });
+        console.log("Register RPC result:", { memberData, rpcErr });
+        if (rpcErr) {
+          console.error("RPC error:", rpcErr);
+          // Member might already exist from a previous attempt
+        }
+        await loadMember(userId);
+      } else {
+        // No session = email confirmation required
+        setError("Akun berhasil dibuat! Silakan login.");
+        setScreen("login");
+        setLoading(false);
+      }
     } catch (e) {
+      console.error("SignUp error:", e);
       setError(e.message || "Registrasi gagal");
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleSignIn = async (email, password) => {
@@ -96,9 +134,29 @@ export default function App() {
     setLoading(true);
     try {
       const { data, error: err } = await supabase.auth.signInWithPassword({ email, password });
+      console.log("SignIn result:", { data, err });
       if (err) throw err;
-      await loadMember(data.user.id);
+
+      // Check if member exists
+      const { data: memberData } = await supabase
+        .from("members")
+        .select("*")
+        .eq("auth_id", data.user.id)
+        .maybeSingle();
+
+      console.log("Member after login:", memberData);
+
+      if (memberData) {
+        setMember(memberData);
+        setScreen("home");
+      } else {
+        // User exists in auth but not in members table - this shouldn't happen normally
+        // Try to show a helpful message
+        setError("Akun ditemukan tapi profil member belum dibuat. Hubungi admin.");
+        setScreen("login");
+      }
     } catch (e) {
+      console.error("SignIn error:", e);
       setError(e.message || "Login gagal");
     }
     setLoading(false);
@@ -113,7 +171,7 @@ export default function App() {
 
   const refreshMember = async () => {
     if (member) {
-      const { data } = await supabase.from("members").select("*").eq("id", member.id).single();
+      const { data } = await supabase.from("members").select("*").eq("id", member.id).maybeSingle();
       if (data) setMember(data);
     }
   };
