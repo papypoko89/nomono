@@ -178,7 +178,7 @@ export default function App() {
 
   if (loading && screen === "splash") return <SplashScreen />;
 
-  const mainScreens = ["home", "qr", "rewards", "history", "profile"];
+  const mainScreens = ["home", "qr", "rewards", "vouchers", "history", "profile"];
   const isMain = mainScreens.includes(screen);
 
   return (
@@ -193,7 +193,8 @@ export default function App() {
           <div style={{ paddingBottom: 80 }}>
             {screen === "home" && <HomeScreen member={member} />}
             {screen === "qr" && <QRScreen member={member} />}
-            {screen === "rewards" && <RewardsScreen member={member} onRefresh={refreshMember} />}
+            {screen === "rewards" && <RewardsScreen member={member} onRefresh={refreshMember} onGoVouchers={() => setScreen("vouchers")} />}
+            {screen === "vouchers" && <VouchersScreen member={member} />}
             {screen === "history" && <HistoryScreen member={member} />}
             {screen === "profile" && <ProfileScreen member={member} onLogout={handleLogout} />}
           </div>
@@ -440,11 +441,12 @@ function QRScreen({ member }) {
   );
 }
 
-function RewardsScreen({ member, onRefresh }) {
+function RewardsScreen({ member, onRefresh, onGoVouchers }) {
   const [rewards, setRewards] = useState([]);
   const [filter, setFilter] = useState("all");
   const [redeeming, setRedeeming] = useState(null);
   const [msg, setMsg] = useState("");
+  const [lastVoucher, setLastVoucher] = useState(null);
 
   useEffect(() => {
     supabase.from("reward_catalog").select("*").eq("is_active", true).order("coin_cost")
@@ -453,9 +455,9 @@ function RewardsScreen({ member, onRefresh }) {
 
   const handleRedeem = async (reward) => {
     if (member.coin_balance < reward.coin_cost) return;
-    setRedeeming(reward.id); setMsg("");
+    setRedeeming(reward.id); setMsg(""); setLastVoucher(null);
     const { data, error } = await supabase.rpc("redeem_reward", { p_member_id: member.id, p_reward_id: reward.id });
-    if (data?.voucher_code) { setMsg(`Berhasil! Voucher: ${data.voucher_code}`); onRefresh(); }
+    if (data?.voucher_code) { setMsg(`Berhasil! Voucher: ${data.voucher_code}`); setLastVoucher(data.voucher_code); onRefresh(); }
     else setMsg(error?.message || "Gagal redeem");
     setRedeeming(null);
   };
@@ -475,7 +477,10 @@ function RewardsScreen({ member, onRefresh }) {
             <div style={{ fontSize: 22, fontWeight: 700, color: "#C39A4B", fontFamily: fm }}>{member.coin_balance}</div>
           </div>
         </div>
-        {msg && <div style={{ marginTop: 10, padding: "10px 14px", borderRadius: 10, background: msg.includes("Berhasil") ? "#e8f0e4" : "#ffeaea", color: msg.includes("Berhasil") ? "#2a8a50" : "#c44", fontSize: 12, fontFamily: fm }}>{msg}</div>}
+        {msg && <div style={{ marginTop: 10, padding: "10px 14px", borderRadius: 10, background: msg.includes("Berhasil") ? "#e8f0e4" : "#ffeaea", color: msg.includes("Berhasil") ? "#2a8a50" : "#c44", fontSize: 12, fontFamily: fm }}>
+          {msg}
+          {lastVoucher && <button onClick={onGoVouchers} style={{ display: "block", marginTop: 8, padding: "6px 16px", borderRadius: 8, border: "none", background: "#003820", color: "#fff", fontFamily: fm, fontSize: 10, fontWeight: 600, cursor: "pointer", letterSpacing: 1 }}>LIHAT VOUCHER SAYA →</button>}
+        </div>}
         <div style={{ display: "flex", gap: 6, marginTop: 14, overflowX: "auto" }}>
           {cats.map(c => (
             <button key={c} onClick={() => setFilter(c)} style={{ padding: "6px 14px", borderRadius: 20, border: "none", cursor: "pointer", fontFamily: fm, fontSize: 11, whiteSpace: "nowrap", background: filter === c ? "#003820" : "#fff", color: filter === c ? "#fff" : "#6b6560", boxShadow: filter === c ? "none" : "inset 0 0 0 1px #ddd9cc" }}>
@@ -497,6 +502,107 @@ function RewardsScreen({ member, onRefresh }) {
               <button onClick={() => handleRedeem(r)} disabled={!ok || redeeming === r.id} style={{ padding: "7px 14px", borderRadius: 10, border: "none", background: ok ? "#003820" : "#ddd9cc", color: ok ? "#fff" : "#a09a8a", fontFamily: fm, fontSize: 10, fontWeight: 600, cursor: ok ? "pointer" : "default" }}>
                 {redeeming === r.id ? "..." : "TUKAR"}
               </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function VouchersScreen({ member }) {
+  const [vouchers, setVouchers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("active");
+  const [expanded, setExpanded] = useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    const { data } = await supabase
+      .from("redemptions")
+      .select("*, reward_catalog(name, icon, category)")
+      .eq("member_id", member.id)
+      .order("created_at", { ascending: false });
+    if (data) setVouchers(data);
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const active = vouchers.filter(v => v.status === "available" && new Date(v.expires_at) > new Date());
+  const used = vouchers.filter(v => v.status === "redeemed");
+  const expired = vouchers.filter(v => v.status === "expired" || (v.status === "available" && new Date(v.expires_at) <= new Date()));
+  const shown = tab === "active" ? active : tab === "used" ? used : expired;
+
+  const daysLeft = (d) => { const diff = Math.ceil((new Date(d) - new Date()) / 86400000); return diff; };
+
+  const statusColors = { available: "#2a8a50", redeemed: "#6b6560", expired: "#c44" };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#FAF8F2" }}>
+      <div style={{ padding: "52px 20px 0" }}>
+        <div style={{ fontFamily: fm, fontSize: 10, color: "#6b6560", letterSpacing: 2 }}>VOUCHER SAYA</div>
+        <div style={{ fontSize: 20, fontWeight: 700, color: "#231F20", marginTop: 4 }}>My Vouchers</div>
+        <div style={{ display: "flex", gap: 6, marginTop: 14 }}>
+          {[
+            { key: "active", label: `Aktif (${active.length})` },
+            { key: "used", label: `Terpakai (${used.length})` },
+            { key: "expired", label: `Expired (${expired.length})` },
+          ].map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{ flex: 1, padding: "8px 4px", borderRadius: 10, border: "none", cursor: "pointer", fontFamily: fm, fontSize: 10, fontWeight: 600, background: tab === t.key ? "#003820" : "#fff", color: tab === t.key ? "#fff" : "#6b6560", boxShadow: tab === t.key ? "none" : "inset 0 0 0 1px #ddd9cc" }}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={{ padding: "14px 20px 20px" }}>
+        {loading && <div style={{ textAlign: "center", padding: 40, color: "#a09a8a", fontFamily: fm }}>Memuat...</div>}
+        {!loading && shown.length === 0 && <div style={{ textAlign: "center", padding: 40, color: "#a09a8a", fontFamily: fm }}>Tidak ada voucher</div>}
+        {shown.map(v => {
+          const rw = v.reward_catalog || {};
+          const isActive = v.status === "available" && new Date(v.expires_at) > new Date();
+          const isExpanded = expanded === v.id;
+          const dl = daysLeft(v.expires_at);
+          return (
+            <div key={v.id} style={{ background: "#fff", borderRadius: 16, border: `1.5px solid ${isActive ? "#C39A4B44" : "#ddd9cc"}`, marginBottom: 10, overflow: "hidden", opacity: isActive ? 1 : 0.6 }}>
+              <div onClick={() => setExpanded(isExpanded ? null : v.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", cursor: "pointer" }}>
+                <div style={{ width: 44, height: 44, borderRadius: 12, background: isActive ? "#003820" : "#F5F2E8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{rw.icon || "🎁"}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#231F20" }}>{rw.name || "Reward"}</div>
+                  <div style={{ fontFamily: fm, fontSize: 10, color: statusColors[v.status] || "#6b6560", marginTop: 2 }}>
+                    {isActive ? `${dl} hari tersisa` : v.status === "redeemed" ? `Dipakai ${new Date(v.redeemed_at).toLocaleDateString("id-ID")}` : "Expired"}
+                  </div>
+                </div>
+                <div style={{ fontFamily: fm, fontSize: 10, color: "#a09a8a", letterSpacing: 1 }}>{v.voucher_code}</div>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a09a8a" strokeWidth="2" style={{ transform: isExpanded ? "rotate(180deg)" : "none", transition: "0.2s" }}><path d="M6 9l6 6 6-6"/></svg>
+              </div>
+              {isExpanded && (
+                <div style={{ padding: "0 16px 18px", borderTop: "1px dashed #ddd9cc" }}>
+                  {isActive && (
+                    <div style={{ textAlign: "center", padding: "18px 0 10px" }}>
+                      <div style={{ fontFamily: fm, fontSize: 9, color: "#6b6560", letterSpacing: 1.5, marginBottom: 10 }}>TUNJUKKAN KE STAFF UNTUK REDEEM</div>
+                      <div style={{ display: "inline-block", padding: 14, background: "#fff", borderRadius: 14, border: "2px solid #C39A4B" }}>
+                        <img src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(v.voucher_code)}&bgcolor=FFFFFF&color=003820`} alt="QR" style={{ width: 160, height: 160, display: "block" }} />
+                      </div>
+                      <div style={{ fontFamily: fm, fontSize: 18, fontWeight: 700, color: "#003820", marginTop: 12, letterSpacing: 3 }}>{v.voucher_code}</div>
+                      <div style={{ fontFamily: fm, fontSize: 10, color: "#C39A4B", marginTop: 4 }}>Berlaku sampai {new Date(v.expires_at).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" })}</div>
+                    </div>
+                  )}
+                  {v.status === "redeemed" && (
+                    <div style={{ padding: "14px 0 4px" }}>
+                      <div style={{ fontFamily: fm, fontSize: 10, color: "#6b6560" }}>
+                        Diproses oleh: <strong>{v.staff_name || "-"}</strong><br/>
+                        Tanggal: {new Date(v.redeemed_at).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        {v.nota_majoo && <><br/>Nota Majoo: <strong>{v.nota_majoo}</strong></>}
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, fontFamily: fm, fontSize: 10, color: "#a09a8a" }}>
+                    <span>Koin: {v.coins_spent}</span>
+                    <span>Ditukar: {new Date(v.created_at).toLocaleDateString("id-ID")}</span>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -625,7 +731,7 @@ function BottomNav({ active, onNavigate }) {
     { id: "home", label: "Home", d: "M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z M9 22V12h6v10" },
     { id: "qr", label: "My QR", d: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h3v3h-3z" },
     { id: "rewards", label: "Rewards", d: "M12 2a6 6 0 016 6c0 3-2 5.3-6 8-4-2.7-6-5-6-8a6 6 0 016-6z" },
-    { id: "history", label: "Riwayat", d: "M12 2a10 10 0 1010 10A10 10 0 0012 2zM12 6v6l4 2" },
+    { id: "vouchers", label: "Voucher", d: "M2 9a3 3 0 013-3h14a3 3 0 013 3v1a3 3 0 00-3 3 3 3 0 003 3v1a3 3 0 01-3 3H5a3 3 0 01-3-3v-1a3 3 0 003-3 3 3 0 00-3-3V9z" },
     { id: "profile", label: "Profile", d: "M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2M12 3a4 4 0 110 8 4 4 0 010-8z" },
   ];
   return (
